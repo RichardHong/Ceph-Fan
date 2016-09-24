@@ -1,0 +1,257 @@
+
+Ceph Jewel Installation 
+--------------------------------
+环境：
+Node: ceph-node-01, ceph-node-02, ceph-node-03
+OS: CentOS 7.1 1503 x86_64   (最好选择CentOS7.2)
+----------- 硬盘规划很总要-------------------
+1. 系统盘：需要做RAID
+2. OSD数据盘规划
+3. OSD Journal规划
+4. 
+
+---------------------------------------------
+
+1. Deploy node：
+   1.1 Copy yum package to deploy node。
+   1.2 Setup ntp server.
+   
+
+#Start to deploy ceph-node, runing the steps in all node.
+2. system config
+   2.1 disable selinux
+   2.2 disable firewall
+   # systemctl disable firewalld
+   2.3 Set hostname
+   # hostnamectl set-hostname ceph-node-01.ceph-test.net
+   2.4 edit /etc/hosts
+   -127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
+   -::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+   -192.168.1.30     ceph-node-01   ceph-node-01.ceph-test.net
+   -192.168.1.31     ceph-node-02   ceph-node-02.ceph-test.net
+   -192.168.1.32     ceph-node-03   ceph-node-03.ceph-test.net
+   
+   2.5 Update Linux Kernel
+   # wget http://192.168.1.2/ceph-jewel/rpm-jewel/kernel-lt-4.4.7-1.el7.elrepo.x86_64.rpm
+   # wget http://192.168.1.2/ceph-jewel/rpm-jewel/kernel-lt-devel-4.4.7-1.el7.elrepo.x86_64.rpm
+   # rpm -hiv kernel-lt-4.4.7-1.el7.elrepo.x86_64.rpm
+   # rpm -hiv kernel-lt-devel-4.4.7-1.el7.elrepo.x86_64.rpm
+   
+   2.6 Change grub2 first boot kernel
+   # cat /etc/grub2.conf |grep menuentry
+   # grub2-set-default "CentOS Linux (4.6.4-1.el7.elrepo.x86_64) 7 (Core)"
+   # grub2-editenv list
+   
+   2.6 Restart Host
+   # reboot
+
+3. 软件安装源配置
+   3.1 config yum repository (/etc/yum.repos.d/local.repo)
+   -[CEPH]
+   -name=Ceph yum Resource
+   -baseurl=http://192.168.1.2/ceph-jewel/rpm-jewel
+   -gpgcheck=0
+   -enabled=1
+   -
+   -[ISO]
+   -name=CentOS yum Resource
+   -baseurl=http://192.168.1.2/ISO
+   -gpgcheck=0
+   -enabled=1
+   
+   
+3. 时间同步
+	配置/etc/ntp.conf, 将server配置到本地的时间服务器。
+	# yum install ntp
+	# systemctl enable ntpd
+	# systemctl start ntpd
+
+4.  配置ssh互信
+   4.1 在node1创建密钥文件
+   # ssh-keygen
+   4.2 本机能与localhost无密码登录
+   # ssh-copy-id localhost
+   4.3 将密钥拷贝到其它节点上
+   # scp -r ~/.ssh ceph-node-02:/root/
+   # scp -r ~/.ssh ceph-node-03:/root/
+
+5. 调整内核最大线程数
+	# cat /proc/sys/kernel/pid_max
+	32768
+	# echo "kernel.pid_max = 4194303" >> /etc/sysctl.conf
+	# sysctl -p
+	kernel.pid_max = 4194303
+	#scp /etc/sysctl.conf ceph-node-02:/etc/
+	#scp /etc/sysctl.conf ceph-node-03:/etc/
+	
+6.  创建部署Ceph的用户
+	==> 创建账号,ceph-admin工具必须以普通用户登录 Ceph 节点，且此用户拥有无密码使用 sudo 的权限，
+		因为它需要在安装软件及配置文件的过程中，不必输入密码。
+	#adduser -d /home/ceph-admin ceph-admin
+	#passwd ceph-admin
+	
+	==> 确保各 Ceph 节点上新创建的用户都有 sudo 权限
+	# echo "ceph-admin ALL = (root) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/ceph-admin
+	# chmod 0440 /etc/sudoers.d/ceph-admin
+	
+	==>允许无秘钥ssh登录
+	#su ceph-admin
+	#ssh-keygen
+	[ceph-admin@ceph-node-01 ~]$ ssh-copy-id ceph-admin@ceph-node-01
+	[ceph-admin@ceph-node-01 ~]$ ssh-copy-id ceph-admin@ceph-node-02
+	[ceph-admin@ceph-node-01 ~]$ ssh-copy-id ceph-admin@ceph-node-03
+
+7. 在node1上面安装ceph-deploy
+    [root@ceph-node-01 ~]# yum install ceph-deploy
+	
+8. 禁用requiretty
+	#sudo visudo
+	（找到 Defaults requiretty 选项，把它改为 Defaults:ceph !requiretty）
+   	
+9. 存储集群部署
+	==> 创建配置目录
+	[ceph-admin@ceph-node-01 ~]$ mkdir ceph-cluster
+	[ceph-admin@ceph-node-01 ~]$ cd ceph-cluster/
+
+	==> 初始化集群
+	$ ceph-deploy new ceph-node-01 ceph-node-02 ceph-node-03
+
+	==> 本地源安装ceph，分别在每台机器上安装
+	[ceph-admin@ceph-node-01 ceph-cluster]$ sudo  yum  install ceph ceph-radosgw
+	
+	==> 配置初始 monitor(s)、并收集所有密钥
+		需要升级systemd，否则会出现sytemctl不能找到.service的错误。(systemd-219-19.el7_2.12.x86_64.rpm)
+	# yum update systemd
+	[ceph-admin@ceph-node-01 ceph-cluster]$ ceph-deploy mon create-initial
+
+	==> 创建集群，同步配置文件
+	[ceph-admin@ceph-node-01 ceph-cluster]$ ceph-deploy admin ceph-node-02 ceph-node-03
+
+10. 清除磁盘数据
+    ==> 查看所有磁盘
+	[root@ceph-node-01 ~]# fdisk -l | grep sd
+	Disk /dev/sdc: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	Disk /dev/sda: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	/dev/sda1   *           1  4294967295  2147483647+  ee  GPT
+	Disk /dev/sdd: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	Disk /dev/sdf: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	Disk /dev/sdg: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	Disk /dev/sdh: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	Disk /dev/sdb: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	Disk /dev/sde: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	Disk /dev/sdi: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	==> 清除磁盘
+	#sgdisk -Z -o -g /dev/sdb
+	#sgdisk -Z -o -g /dev/sdc
+	#sgdisk -Z -o -g /dev/sdd
+	#sgdisk -Z -o -g /dev/sde
+	#sgdisk -Z -o -g /dev/sdf
+	#sgdisk -Z -o -g /dev/sdg
+	#sgdisk -Z -o -g /dev/sdh
+	#sgdisk -Z -o -g /dev/sdi
+	==> 查看磁盘信息
+	[root@ceph-node-01 ~]# fdisk -l | grep sd
+	Disk /dev/sdc: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	/dev/sdc1               1  4294967295  2147483647+  ee  GPT
+	Disk /dev/sda: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	/dev/sda1   *           1  4294967295  2147483647+  ee  GPT
+	Disk /dev/sdd: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	/dev/sdd1               1  4294967295  2147483647+  ee  GPT
+	Disk /dev/sdf: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	/dev/sdf1               1  4294967295  2147483647+  ee  GPT
+	Disk /dev/sdg: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	/dev/sdg1               1  4294967295  2147483647+  ee  GPT
+	Disk /dev/sdh: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	/dev/sdh1               1  4294967295  2147483647+  ee  GPT
+	Disk /dev/sdb: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	/dev/sdb1               1  4294967295  2147483647+  ee  GPT
+	Disk /dev/sde: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	/dev/sde1               1  4294967295  2147483647+  ee  GPT
+	Disk /dev/sdi: 4000.8 GB, 4000787030016 bytes, 7814037168 sectors
+	/dev/sdi1               1  4294967295  2147483647+  ee  GPT
+
+10. 清除磁盘数据-2
+	==> 列出磁盘
+	$ ceph-deploy disk list ceph-node-01
+	==> 清除数据
+	$ ceph-deploy disk zap ceph-node-02:sdb
+	
+11. 准备OSD
+	==>加入OSD,将sdb作为journal磁盘（一个日志盘效率有问题） 
+	$ ceph-deploy osd prepare ceph-node-01:/dev/sd{c,d,e,f,g,h,i}:/dev/sdb
+	$ ceph-deploy osd prepare ceph-node-02:/dev/sd{c,d,e,f,g,h,i,j}:/dev/sdb
+	$ ceph-deploy osd prepare ceph-node-03:/dev/sd{c,d,e,f,g,h,i}:/dev/sdb
+
+12. 配置OSD群組規則
+	==> 防止Ceph自動更新配置文件，輸入 vi /etc/ceph/ceph.conf，加入以下參數. 
+		Why? <=== 那个进程或命令会自动更新配置？非mon节点是否也要更新这个配置？
+	[global]
+	…
+	osd_crush_update_on_start = false
+	
+	==> 重启ceph进程
+	#
+	
+13. 创建pool并设置PG(placement group)	
+	==> 根据 Total PGs = (#OSDs * 100) / pool size 公式来决定 pg_num（pgp_num 应该设成和 pg_num 一样），
+		所以 21*100/3=700，Ceph 官方推荐取最接近2的指数倍，所以选择 1024 
+		??? 512/1024 ???
+	# ceph osd pool create volumes 1024
+	# ceph osd pool set volumes size 3
+	# 
+	# ceph osd pool create images 1024
+	# ceph osd pool set images size 3
+
+	
+14. 建立Ceph驗證與權限
+	==> 創建 cinder 帳號與 glance 帳號分別存取 volumes 與 images pool 並導出金鑰，輸入以下
+	# ceph auth get-or-create client.cinder mon 'allow r' osd 'allow class-read object_prefix rbd_children, allow rwx pool=volumes, allow rx pool=images'
+	# ceph auth get-or-create client.glance mon 'allow r' osd 'allow class-read object_prefix rbd_children, allow rwx pool=images'
+	
+	==> 创建client.cinder, client.glance客户的秘钥，并保存副本。
+	# ceph auth get-or-create client.cinder > /etc/ceph/ceph.client.cinder.keyring
+	# ceph auth get-or-create client.glance > /etc/ceph/ceph.client.glance.keyring
+
+
+15. OpenStack用户
+
+----------------------------------------------------------------------------------
+16. 增加主机 (增加OSD，但是不增加Monitor)
+		
+	==> 执行2,3,4,5,6步骤
+	# [root@ceph-node-01 ~]# cat /etc/hosts
+	127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
+	::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+	
+	192.168.1.30     ceph-node-01   ceph-node-01.ceph-test.net
+	192.168.1.31     ceph-node-02   ceph-node-02.ceph-test.net
+	192.168.1.32     ceph-node-03   ceph-node-03.ceph-test.net
+	192.168.1.33     ceph-node-04   ceph-node-04.ceph-test.net
+	
+	[root@ceph-node-01 ~]# scp /etc/yum.repos.d/* ceph-node-04:/etc/yum.repos.d/
+	[root@ceph-node-01 ~]# scp /etc/hosts ceph-node-02:/etc/
+	[root@ceph-node-01 ~]# scp /etc/hosts ceph-node-03:/etc/
+	[root@ceph-node-01 ~]# scp /etc/hosts ceph-node-04:/etc/
+	
+	
+	==> 升级systemd
+	# yum update systemd
+	
+	==> 重启新增节点
+	#reboot
+	
+	==> 禁用requiretty
+	#sudo visudo
+	（找到 Defaults requiretty 选项，把它改为 Defaults:ceph !requiretty）
+	
+	==> 本地源安装ceph，分别在每台机器上安装
+	[ceph-admin@ceph-node-04]$ sudo  yum  install ceph ceph-radosgw
+	
+----------------------------------------------------------------------------------
+# add new mpt3sas driver to initramfs image
+dracut --force --add-drivers mpt3sas --kver=4.4.7-1.el7.elrepo.x86_64
+
+# ensure that mpt3sas driver exist in initramfs image
+lsinitrd -k  4.4.7-1.el7.elrepo.x86_64 | grep mpt3sas
+   
+   
